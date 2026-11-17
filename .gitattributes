@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Script shell dijalankan di Linux; CRLF membuat bash error ("command not found")
+*.sh text eol=lf
