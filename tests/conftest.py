@@ -80,7 +80,8 @@ def database():
 async def admin():
     conn = await asyncpg.connect(ADMIN_TEST_DSN)
     await conn.execute(
-        "truncate public.sensor_raw_readings, public.clock_events, public.ingest_rejects restart identity"
+        "truncate public.sensor_raw_readings, public.clock_events, public.ingest_rejects, "
+        "public.calibrated_sensor_raw_readings restart identity"
     )
     await conn.execute(
         "truncate public.irrigation_actions, public.fertigation_actions, public.actuator_commands, "

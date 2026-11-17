@@ -34,6 +34,7 @@ ESP32 --HTTPS--> Caddy (443, Let's Encrypt) --> app (FastAPI, 1 worker)
 | `app/dispatcher.py` | Dispatcher mode auto, tiap 60 detik (§5) |
 | `app/water_balance.py` | Neraca air FAO-56: ledger per jam + rule engine (v11) |
 | `app/weather.py` | Klien Open-Meteo, snapshot prakiraan, job cuaca observasi harian (v12) |
+| `app/rf_shadow.py` | Random Forest irigasi dalam shadow mode: hanya mencatat prediksi Dr 24 jam |
 | `app/auth.py` | Token per node (SHA-256, cache 60 detik) |
 | `app/cli.py` | `create-token` / `rotate-token` |
 | `scripts/sim_node.py` | Simulator node (stdlib saja) |
@@ -428,6 +429,78 @@ berisi fetch nyata sejak job ini berjalan.
 | `WX_HTTP_TIMEOUT_S` | `15` | Timeout per permintaan |
 | `WX_HTTP_ATTEMPTS` | `3` | Jumlah percobaan |
 | `WX_HTTP_BACKOFF_S` | `1` | Jeda dasar backoff eksponensial |
+
+## RF: shadow mode dan active mode
+
+Model Random Forest irigasi (`ML/TrainingAgain/skenario_4_data_gabungan_forecast`) punya tiga mode
+lewat `RF_MODE`: `off` (default), `shadow` (fase 1, hanya mencatat), dan `active` (fase 2, ikut di R4).
+
+### `RF_MODE=active`
+
+- RF dihitung **sebelum** FAO-56 memutuskan (fitur dan titik t sama dengan shadow).
+- Kalau RF `reliable`: aturan **R4** (antisipasi di jendela pagi) memakai Dr 24 jam RF menggantikan
+  `dr_forecast_24h_mm` FAO-56. Baris keputusan: `decision_layer='fao56+rf'`, `model_id=RF_MODEL_ID`,
+  `status_model='reliable'`, `prediction_dr_value` = Dr RF, `prediction_error_margin` = std antar pohon;
+  `dr_forecast_24h_mm` tetap nilai FAO-56 untuk pembanding. Dispatcher memprosesnya seperti baris FAO-56.
+- Kalau RF `uncertain`, fitur tidak lengkap, atau RF error: keputusan FAO-56 murni (`decision_layer='fao56'`);
+  catatan RF ada di `reason` bila prediksinya ada.
+- R1, R2, R3, R5 dan `decide()` tidak berubah. RF bisa memicu R4 yang tidak dipicu FAO-56, dan bisa
+  juga membatalkannya bila Dr RF < RAW. Tidak ada baris `rf` terpisah di mode ini.
+- Hasil evaluasi training: RF belum lebih baik dari rule engine. Pakai `active` untuk uji/simulasi.
+
+### `RF_MODE=shadow`
+
+RF dijalankan berdampingan dengan rule engine FAO-56, tetapi **tidak pernah memutuskan siram**:
+
+- Dipanggil dari `water_balance.run_cycle()` tepat setelah baris FAO-56 plot itu ditulis, di dalam
+  try/except sendiri. Kegagalan RF hanya dicatat di log; siklus FAO-56 tidak berubah.
+- Hanya untuk plot milik model (`bundle["plot_id"]`). Titik t = awal blok 5 menit terakhir yang sudah
+  lengkap (siklus 07:05 WIB → t = 07:00 WIB).
+- Fitur (20, urutan bundle) dihitung persis seperti training dari `calibrated_sensor_raw_readings`
+  (sumber yang sama dengan export training) dan `weather_forecast_snapshots` (snapshot terbaru dengan
+  `fetched_at ≤ t`). Hujan dari selisih `rainfall_tip_count` × 0,2891 mm/tip, menit > 10 tip dibuang;
+  ini terpisah dari hujan FAO-56 (`_sensor_rain`, faktor `nodes.rain_mm_per_tip`).
+- Ada fitur NaN (data < 24 jam, ada blok 5 menit kosong, prakiraan tidak menjangkau t+24 jam):
+  tidak ada insert, satu baris log `event=rf_shadow, skipped=fitur_tidak_lengkap`.
+- Baris yang ditulis ke `irrigation_predictions`: `decision_layer='rf'`, `model_id=RF_MODEL_ID`,
+  `prediction_dr_value` (Dr t+24 jam), `prediction_error_margin` (std antar pohon, mm), `status_model`
+  `reliable` bila std/RAW×100 ≤ `RF_ERROR_THRESHOLD_PCT` (selain itu `uncertain`),
+  `predicted_soil_moisture = θ_FC − Dr/Zr×100`, `raw_mm`, `taw_mm`, `irrigation_triggered=false`,
+  `recommended_irrigation_mm=null`, `reason='rf_shadow: ...'`. Paling banyak satu baris per plot per 50 menit.
+- Dispatcher mengabaikan baris `decision_layer='rf'` walaupun `irrigation_triggered` diubah jadi true
+  (pengaman kedua).
+
+| Env | Default | Arti |
+|---|---|---|
+| `RF_MODE` | `off` | `off` / `shadow` / `active`; selain itu dianggap `off` (dengan log) |
+| `RF_MODEL_PATH` | kosong | Path file `.joblib` **di dalam container** (`./models` di-mount read-only ke `/srv/models`) |
+| `RF_MODEL_ID` | kosong | `model_registries.id` (lihat `docs/rf_shadow_model_registry.sql`) |
+| `RF_ERROR_THRESHOLD_PCT` | `25` | Batas uncertainty untuk `reliable` |
+
+Kalau RF `off`, atau path/ID kosong, atau model gagal dimuat, RF dilewati dengan satu baris log
+(keputusan FAO-56 murni).
+File model (20 MB) tidak masuk repo (`models/` ada di `.gitignore`). Versi `numpy`, `pandas`,
+`scikit-learn`, dan `joblib` di `requirements.txt` sama dengan lingkungan training; jangan dinaikkan
+tanpa melatih/menyimpan ulang model.
+
+Menyalakan (simulasi):
+
+```bash
+mkdir -p models && cp <path>/smile_irigasi_gabungan_forecast_model.joblib models/
+psql ... -f docs/rf_shadow_model_registry.sql      # sekali; JANGAN ke produksi tanpa keputusan tim
+# .env: RF_MODE=shadow, RF_MODEL_ID=<id dari SQL di atas>
+docker compose up -d --build
+docker logs smile-ingest-app 2>&1 | grep '"event": "rf'
+```
+
+Pindah mode di simulasi: `sim/sim.sh rf off|shadow|active` (ubah `.env` lalu restart app, ±10 detik).
+Di luar simulasi: ubah `RF_MODE` di `.env` lalu `docker compose up -d --force-recreate app`.
+Baris `rf` lama tetap ada dan bisa dihapus dengan `delete from irrigation_predictions where decision_layer = 'rf'`.
+
+Uji kesamaan fitur dengan training butuh folder ML:
+`RF_TEST_ML_DIR=".../ML/TrainingAgain" pytest tests/test_rf_shadow_pure.py`. Satu-satunya perbedaan
+yang diizinkan: fitur hujan di titik yang jendela 24 jamnya mencakup ketukan manual 7 Nov 16:11–16:13
+(dibuang khusus di training).
 
 ## Deploy (Caddy + Let's Encrypt)
 

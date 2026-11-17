@@ -51,7 +51,30 @@ python3 sim/compare_schema.py     # selisih skema vs supabase_database.md
 ./sim/sim.sh reset                # kosongkan DB, ulang dari migrasi
 ```
 
-Node uji (token dummy, hanya berlaku di DB lokal):
+### Input ala ESP → keputusan siram
+
+DB simulasi sekarang berisi data impor Supabase (backup 12 Nov), jadi node default `sim.sh` adalah
+`fe3e0beb-cdd7-43cd-a409-07e474d1518b` (plot `e4ecc640-…`) dengan token simulasi `sim-token-fe3e0beb`
+(hash-nya diset langsung di DB simulasi; token produksi node ini tidak dipakai di sini).
+
+Konfigurasi data simulasi untuk node itu (bukan kode): `sensor_calibrations` soil_moisture
+`{13.279, 0.5814}` (= rumus cadangan trigger kalibrasi), `water_flow_lpm` 1,59, `wetted_area_m2` 0,64,
+`valve_mode` auto, jendela pagi 06–09 WIB, dan `.env` `WB_CORRECT_EVERY_H=1` (Dr dikoreksi sensor tiap jam).
+
+```bash
+./sim/sim.sh esp --soil-m 60     # mentah 60 -> θ 48,2 %vol -> Dr ≥ RAW -> siram (R3)
+./sim/sim.sh esp --soil-m 85     # mentah 85 -> θ 62,7 %vol ≥ θ_FC -> tidak siram (R1)
+./sim/sim.sh node --actuator --run-s 120   # "ESP" mengambil perintah lalu melapor
+./sim/sim.sh rf active           # RF ikut di R4 (pindah lagi: rf shadow / rf off)
+```
+
+`esp` mengganti bacaan 26 jam terakhir node itu, mengirim 1.500 baris (1/menit, tanpa hujan), langsung
+menjalankan satu siklus keputusan (`--force`, tanpa aturan 50 menit), menunggu dispatcher (±65 s),
+lalu menampilkan keputusan dan perintah aktuator. Di luar 06–09 WIB keputusan siram tetap tercatat,
+tapi dispatcher menandainya `outside_window` (tidak ada perintah). R4 dan RF `active` hanya berlaku
+di jendela pagi.
+
+Node uji seed (setelah `reset`; pakai `SIM_NODE=... SIM_TOKEN=...`):
 
 | Node | UUID | Token |
 |---|---|---|

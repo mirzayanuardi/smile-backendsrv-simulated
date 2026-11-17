@@ -2,3 +2,8 @@ fastapi==0.115.12
 uvicorn[standard]==0.34.2
 asyncpg==0.30.0
 httpx==0.28.1
+# RF shadow: versi sama dengan training (file joblib dimuat dengan versi ini)
+numpy==2.5.4
+pandas==3.0.6
+scikit-learn==1.9.1
+joblib==1.6.0

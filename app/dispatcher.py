@@ -50,6 +50,7 @@ join lateral (
      and p.dispatched_command_id is null
      and p.dispatch_note is null
      and p.created_at > now() - interval '30 minutes'
+     and coalesce(p.decision_layer, 'fao56') <> 'rf'   -- RF shadow tidak pernah menyiram
    order by p.created_at desc
    limit 1
 ) p on true

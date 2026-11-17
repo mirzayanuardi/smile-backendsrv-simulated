@@ -5,7 +5,7 @@ x-logging: &logging
     max-file: "5"
 
 # SIMULASI. Service `app` identik dengan docker-compose.yml produksi (commit 2f2292e).
-# Satu-satunya tambahan: depends_on ke `db`.
+# Tambahan: depends_on ke `db` dan volume ./models (file model RF shadow, lihat README).
 # Service `db` menggantikan Supabase (Postgres lokal; skema = stub + migrasi asli).
 services:
   app:
@@ -17,6 +17,8 @@ services:
       - "127.0.0.1:8080:8000"
     env_file:
       - .env
+    volumes:
+      - ./models:/srv/models:ro
     deploy:
       resources:
         limits:

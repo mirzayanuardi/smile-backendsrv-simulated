@@ -61,7 +61,7 @@ def build_rows(args, clk: str, t0: datetime) -> list[str]:
         up = args.uptime0 + 60 * i
         flags = 0 if args.start_verified else F_TIME_UNVERIFIED
         soil = [
-            f"{24 + rnd.uniform(-1, 1):.1f}", f"{31 + rnd.uniform(-2, 2):.1f}",
+            f"{24 + rnd.uniform(-1, 1):.1f}", f"{args.soil_m + rnd.uniform(-2, 2):.1f}",
             f"{410 + rnd.randint(-20, 20)}", f"{6.1 + rnd.uniform(-0.2, 0.2):.1f}",
         ]
         npk = ["", "", ""] if args.no_npk else [str(rnd.randint(10, 14)), str(rnd.randint(6, 10)), str(rnd.randint(90, 100))]
@@ -72,7 +72,7 @@ def build_rows(args, clk: str, t0: datetime) -> list[str]:
         if rnd.random() < args.fail_rate:  # SHT31 gagal
             flags |= F_SHT_FAIL
             air = ["", ""]
-        if rnd.random() < 0.05:
+        if rnd.random() < args.rain_rate:
             tips += 1
             rain_mm += 0.2
         rows.append(",".join([iso(t), str(up), clk, str(flags), *soil, *npk, *air, f"{rain_mm:.2f}", str(tips)]))
@@ -307,6 +307,9 @@ def main() -> None:
     p.add_argument("--start", default=None, help="ISO waktu baris pertama; default sekarang - minutes")
     p.add_argument("--uptime0", type=int, default=184)
     p.add_argument("--fail-rate", type=float, default=0.05)
+    p.add_argument("--soil-m", type=float, default=31.0,
+                   help="kelembapan tanah MENTAH yang dikirim (±2); terkalibrasi = 13,279 + 0,5814 x mentah")
+    p.add_argument("--rain-rate", type=float, default=0.05, help="peluang 1 tip hujan per menit (0 = kering)")
     p.add_argument("--no-npk", action="store_true")
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--resend", action="store_true", help="kirim semua chunk dua kali (uji dedup)")

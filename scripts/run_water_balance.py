@@ -1,10 +1,11 @@
 """Jalankan satu siklus neraca air FAO-56 untuk satu plot dan cetak tabel per jam.
 
-    python scripts/run_water_balance.py --plot <uuid> [--dry-run] [--hours 48]
+    python scripts/run_water_balance.py --plot <uuid> [--dry-run] [--hours 48] [--force]
 
 Memakai DATABASE_URL dari .env (role smile_ingest). --dry-run hanya membaca:
 ledger dan prediksi tidak ditulis. Tanpa --dry-run, hasilnya sama persis dengan
-satu siklus job terjadwal (termasuk fetch Open-Meteo, kunci advisory, aturan 50 menit).
+satu siklus job terjadwal (termasuk fetch Open-Meteo, kunci advisory, aturan 50 menit,
+dan RF sesuai RF_MODE). --force melewati aturan 50 menit (pemicu manual, sim.sh esp).
 
 Mode backfill untuk ML (hanya membaca, hanya menulis CSV, TIDAK menyentuh ledger):
 
@@ -32,6 +33,7 @@ import asyncpg
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app import rf_shadow  # noqa: E402
 from app import water_balance as wb  # noqa: E402
 from app import weather  # noqa: E402
 from app.dispatcher import WIB  # noqa: E402
@@ -67,7 +69,8 @@ def print_result(res: wb.PlotResult) -> None:
               f"{_f(r.dr_end_mm)} {'ya' if r.corrected else ''}")
     d, p = res.decision, res.prediction
     print()
-    print(f"keputusan: {d.code}  triggered={d.triggered}  rekomendasi={_f(d.recommended_mm).strip()} mm")
+    print(f"keputusan: {d.code}  triggered={d.triggered}  rekomendasi={_f(d.recommended_mm).strip()} mm  "
+          f"lapisan={p['decision_layer']}")
     print(f"  TAW {p['taw_mm']:.1f} mm, RAW {p['raw_mm']:.1f} mm, ETc 24 jam {p['etc_forecast_24h_mm']:.2f} mm, "
           f"hujan 12 jam {p['rain_forecast_12h_mm']:.1f} mm, Dr 24 jam {p['dr_forecast_24h_mm']:.1f} mm")
     print(f"  reason: {p['reason']}")
@@ -122,6 +125,7 @@ async def main() -> None:
     ap.add_argument("--plot", required=True, type=uuid.UUID)
     ap.add_argument("--dry-run", action="store_true", help="hitung saja, jangan menulis")
     ap.add_argument("--hours", type=int, default=None, help="jendela hitung ulang (default WB_RECOMPUTE_H)")
+    ap.add_argument("--force", action="store_true", help="lewati aturan 50 menit (tulis keputusan baru)")
     ml = ap.add_argument_group("mode backfill ML (hanya CSV)")
     ml.add_argument("--from", dest="from_", metavar="ISO", help="awal rentang (tanpa zona = WIB)")
     ml.add_argument("--to", metavar="ISO", help="akhir rentang, eksklusif")
@@ -145,7 +149,9 @@ async def main() -> None:
             await backfill(conn, args, settings)
         elif args.dry_run:
             access = await wb.check_access(conn)
-            res = await wb.compute_plot(conn, args.plot, settings, access)
+            rf = rf_shadow.RFShadow.from_env()
+            hint = await rf.infer(conn, args.plot, datetime.now(timezone.utc)) if rf and rf.mode == "active" else None
+            res = await wb.compute_plot(conn, args.plot, settings, access, rf_hint=hint)
             if res is None:
                 sys.exit("plot tidak punya parameter tanah atau node irigasi")
             print_result(res)
@@ -153,8 +159,10 @@ async def main() -> None:
         else:
             wx = weather.WXSettings.from_env()
             meteo = weather.OpenMeteo(wx) if wx.forecast_enabled else None
+            rf = rf_shadow.RFShadow.from_env()
             try:
-                out = await wb.run_cycle(conn, settings, plot_ids=[args.plot], meteo=meteo)
+                out = await wb.run_cycle(conn, settings, plot_ids=[args.plot], meteo=meteo, rf=rf,
+                                         force=args.force)
             finally:
                 if meteo is not None:
                     await meteo.aclose()

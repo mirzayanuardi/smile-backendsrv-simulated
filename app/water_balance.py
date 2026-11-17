@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 
 import asyncpg
 
-from . import weather
+from . import rf_shadow, weather
 from .dispatcher import WIB, in_morning_window
 from .jsonlog import log_json
 
@@ -380,7 +380,7 @@ _LEDGER_ID = "select id from public.water_balance_ledger where plot_id = $1 and 
 
 _RECENT_FAO56 = """
 select exists (select 1 from public.irrigation_predictions
-                where plot_id = $1 and decision_layer = 'fao56'
+                where plot_id = $1 and decision_layer in ('fao56', 'fao56+rf')
                   and created_at > now() - interval '50 minutes')
 """
 _INSERT_PREDICTION = """
@@ -388,8 +388,8 @@ insert into public.irrigation_predictions (
   plot_id, prediction_timestamp, model_id, decision_layer, status_model,
   dr_value_fao56, prediction_dr_value, predicted_soil_moisture, raw_value,
   taw_mm, raw_mm, etc_forecast_24h_mm, rain_forecast_12h_mm, dr_forecast_24h_mm,
-  irrigation_triggered, recommended_irrigation_mm, ledger_id, reason
-) values ($1, $2, null, 'fao56', null, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+  irrigation_triggered, recommended_irrigation_mm, ledger_id, reason, prediction_error_margin
+) values ($1, $2, $16, $17, $18, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $19)
 returning id
 """
 
@@ -573,8 +573,11 @@ async def compute_plot(
     settings: WBSettings,
     access: asyncpg.Record,
     now: datetime | None = None,
+    rf_hint: rf_shadow.RFResult | None = None,
 ) -> PlotResult | None:
-    """Hitung ledger jendela + keputusan tanpa menulis apa pun (dipakai juga --dry-run)."""
+    """Hitung ledger jendela + keputusan tanpa menulis apa pun (dipakai juga --dry-run).
+
+    rf_hint (RF_MODE=active): prediksi RF untuk aturan R4, dipakai hanya kalau reliable."""
     now = now or datetime.now(timezone.utc)
     ctx = await _plot_context(conn, plot_id, settings, access)
     if ctx is None:
@@ -664,11 +667,12 @@ async def compute_plot(
         dr = dr_end
 
     result = PlotResult(plot_id, node_id, rows, None if init == "ledger" else init, warnings=warnings)
-    await _decide(conn, result, current, node, fc_rows, settings, now)
+    await _decide(conn, result, current, node, fc_rows, settings, now, rf_hint)
     return result
 
 
-async def _decide(conn, result: PlotResult, cur, node, fc_rows, settings: WBSettings, now: datetime) -> None:
+async def _decide(conn, result: PlotResult, cur, node, fc_rows, settings: WBSettings, now: datetime,
+                  rf_hint: rf_shadow.RFResult | None = None) -> None:
     latest = result.rows[-1]
     dr_now = latest.dr_end_mm
     taw, raw = cur["taw_mm"], cur["raw_mm"]
@@ -688,6 +692,12 @@ async def _decide(conn, result: PlotResult, cur, node, fc_rows, settings: WBSett
     rain12 = sum(r["rain"] or 0 for r in ahead if r["ts"] <= now + timedelta(hours=12))
     rain24 = sum(r["rain"] or 0 for r in ahead)
     dr24 = min(max(dr_now + etc24 - rain24, 0.0), taw)
+    use_rf = rf_hint is not None and rf_hint.reliable
+    if rf_hint is not None:
+        notes.append(f"RF Dr 24 jam {_mm(rf_hint.dr_mm)} mm ({rf_hint.status}, "
+                     f"uncertainty {_mm(rf_hint.uncertainty_pct)} %): "
+                     + (f"R4 memakai RF, FAO-56 {_mm(dr24)} mm" if use_rf else "R4 memakai FAO-56"))
+    dr24_used = rf_hint.dr_mm if use_rf else dr24
 
     theta_row = next((r for r in reversed(result.rows) if r.theta_obs_pct is not None), None)
     raw_row = next((r for r in reversed(result.rows) if r.theta_obs_raw is not None), None)
@@ -695,7 +705,7 @@ async def _decide(conn, result: PlotResult, cur, node, fc_rows, settings: WBSett
         dr_now=dr_now, taw=taw, raw=raw, theta_fc_pct=cur["theta_fc_pct"],
         theta_obs_pct=theta_row.theta_obs_pct if theta_row else None,
         theta_obs_age_h=(now - theta_row.period_end).total_seconds() / 3600 if theta_row else None,
-        rain_forecast_12h_mm=rain12, dr_forecast_24h_mm=dr24,
+        rain_forecast_12h_mm=rain12, dr_forecast_24h_mm=dr24_used,
         in_morning_window=in_morning_window(now, node["morning_start_hour"], node["morning_end_hour"]),
         rain_skip_mm=settings.rain_skip_mm,
     ))
@@ -706,12 +716,17 @@ async def _decide(conn, result: PlotResult, cur, node, fc_rows, settings: WBSett
         reason += "; sensor belum terkalibrasi"
     result.decision = d
     result.prediction = dict(
-        dr_value_fao56=dr_now, prediction_dr_value=dr24,
-        predicted_soil_moisture=cur["theta_fc_pct"] - dr24 / cur["zr_mm"] * 100,
+        dr_value_fao56=dr_now, prediction_dr_value=dr24_used,
+        predicted_soil_moisture=cur["theta_fc_pct"] - dr24_used / cur["zr_mm"] * 100,
         raw_value=raw_row.theta_obs_raw if raw_row else None,
         taw_mm=taw, raw_mm=raw, etc_forecast_24h_mm=etc24, rain_forecast_12h_mm=rain12,
         dr_forecast_24h_mm=dr24, irrigation_triggered=d.triggered,
         recommended_irrigation_mm=d.recommended_mm, reason=reason,
+        # constraint ip_model_required_for_ml: model_id wajib untuk lapisan selain 'fao56'
+        decision_layer="fao56+rf" if use_rf else "fao56",
+        model_id=rf_hint.model_id if use_rf else None,
+        status_model=rf_hint.status if use_rf else None,
+        prediction_error_margin=rf_hint.std_mm if use_rf else None,
     )
 
 
@@ -794,8 +809,11 @@ async def compute_trajectory(
     return Trajectory(rows, init, warnings)
 
 
-async def write_plot(conn: asyncpg.Connection, result: PlotResult, now: datetime) -> uuid.UUID | None:
-    """Satu transaksi per plot: upsert ledger (id baris tetap), lalu satu prediksi."""
+async def write_plot(conn: asyncpg.Connection, result: PlotResult, now: datetime,
+                     force: bool = False) -> uuid.UUID | None:
+    """Satu transaksi per plot: upsert ledger (id baris tetap), lalu satu prediksi.
+
+    force melewati aturan 50 menit (hanya untuk pemicu manual, mis. sim.sh esp)."""
     async with conn.transaction():
         await conn.executemany(_UPSERT, [
             (result.plot_id, result.node_id, r.period_start, r.period_end, r.params_id, r.eto_mm,
@@ -804,7 +822,7 @@ async def write_plot(conn: asyncpg.Connection, result: PlotResult, now: datetime
              r.corrected, r.taw_mm, r.raw_mm, r.calibration_status)
             for r in result.rows
         ])
-        if await conn.fetchval(_RECENT_FAO56, result.plot_id):
+        if not force and await conn.fetchval(_RECENT_FAO56, result.plot_id):
             result.skipped_duplicate = True
             return None
         ledger_id = await conn.fetchval(_LEDGER_ID, result.plot_id, result.rows[-1].period_end)
@@ -814,6 +832,8 @@ async def write_plot(conn: asyncpg.Connection, result: PlotResult, now: datetime
             p["predicted_soil_moisture"], p["raw_value"], p["taw_mm"], p["raw_mm"],
             p["etc_forecast_24h_mm"], p["rain_forecast_12h_mm"], p["dr_forecast_24h_mm"],
             p["irrigation_triggered"], p["recommended_irrigation_mm"], ledger_id, p["reason"],
+            p.get("model_id"), p.get("decision_layer", "fao56"), p.get("status_model"),
+            p.get("prediction_error_margin"),
         )
 
 
@@ -841,11 +861,16 @@ async def run_cycle(
     now: datetime | None = None,
     plot_ids: list[uuid.UUID] | None = None,
     meteo: weather.OpenMeteo | None = None,
+    rf: rf_shadow.RFShadow | None = None,
+    force: bool = False,
 ) -> list[PlotResult] | None:
     """Satu siklus semua plot. None kalau proses lain memegang kunci.
 
     Dengan `meteo`, prakiraan Open-Meteo diambil dulu (satu panggilan per plot)
-    dan disimpan ke weather_forecasts + snapshot. Kegagalannya hanya dicatat di log."""
+    dan disimpan ke weather_forecasts + snapshot. Kegagalannya hanya dicatat di log.
+    Dengan `rf`: mode shadow mencatat prediksi RF setelah baris FAO-56 ditulis;
+    mode active menghitung RF dulu dan memakainya di aturan R4 kalau reliable.
+    `force` melewati aturan 50 menit (pemicu manual)."""
     now = now or datetime.now(timezone.utc)
     if not await conn.fetchval("select pg_try_advisory_lock($1)", WB_LOCK_KEY):
         return None
@@ -856,11 +881,17 @@ async def run_cycle(
             await weather.sync_forecasts(conn, meteo, now, plot_ids)
         plots = plot_ids or [r["plot_id"] for r in await conn.fetch(_PLOTS)]
         for plot_id in plots:
+            hint = None
+            if rf is not None and rf.mode == "active":
+                try:
+                    hint = await rf.infer(conn, plot_id, now)
+                except Exception as e:  # noqa: BLE001 - RF gagal: keputusan FAO-56 murni
+                    log.warning("rf plot %s gagal, dipakai FAO-56: %s: %s", plot_id, type(e).__name__, e)
             try:
-                res = await compute_plot(conn, plot_id, settings, access, now)
+                res = await compute_plot(conn, plot_id, settings, access, now, rf_hint=hint)
                 if res is None:
                     continue
-                pred_id = await write_plot(conn, res, now)
+                pred_id = await write_plot(conn, res, now, force=force)
             except (asyncpg.PostgresError, ArithmeticError, ValueError) as e:
                 log.warning("water balance plot %s gagal: %s: %s", plot_id, type(e).__name__, e)
                 continue
@@ -875,8 +906,13 @@ async def run_cycle(
                 triggered=res.decision.triggered if res.decision else None,
                 recommended_mm=res.decision.recommended_mm if res.decision else None,
                 prediction=pred_id, duplicate=res.skipped_duplicate,
-                warnings=res.warnings or None,
+                layer=res.prediction["decision_layer"], warnings=res.warnings or None,
             )
+            if rf is not None and rf.mode == "shadow":
+                try:
+                    await rf.run(conn, plot_id, now, force=force)
+                except Exception as e:  # noqa: BLE001 - RF shadow tidak boleh mengganggu siklus FAO-56
+                    log.warning("rf shadow plot %s gagal: %s: %s", plot_id, type(e).__name__, e)
     finally:
         await conn.execute("select pg_advisory_unlock($1)", WB_LOCK_KEY)
     return results
@@ -890,12 +926,13 @@ def next_run(now: datetime) -> datetime:
 async def run_forever(database, settings: WBSettings, meteo: weather.OpenMeteo | None = None) -> None:
     """Sekali saat startup (setelah pool siap), lalu tiap jam menit ke-5 WIB."""
     try:
+        rf = await asyncio.to_thread(rf_shadow.RFShadow.from_env)   # model dimuat sekali, di luar event loop
         while database.pool is None:
             await asyncio.sleep(1)
         while True:
             try:
                 async with database.pool.acquire() as conn:
-                    await run_cycle(conn, settings, meteo=meteo)
+                    await run_cycle(conn, settings, meteo=meteo, rf=rf)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 - siklus berikutnya mencoba lagi

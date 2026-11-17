@@ -10,3 +10,7 @@ firmware/secrets.h
 ceklist_server.xlsx
 supabase_databaase.md
 ~$*
+
+# File model ML (20 MB), dipasang lewat RF_MODEL_PATH
+models/
+*.joblib
