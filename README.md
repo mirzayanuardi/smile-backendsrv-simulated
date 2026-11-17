@@ -479,17 +479,18 @@ RF dijalankan berdampingan dengan rule engine FAO-56, tetapi **tidak pernah memu
 
 Kalau RF `off`, atau path/ID kosong, atau model gagal dimuat, RF dilewati dengan satu baris log
 (keputusan FAO-56 murni).
-File model (20 MB) tidak masuk repo (`models/` ada di `.gitignore`). Versi `numpy`, `pandas`,
-`scikit-learn`, dan `joblib` di `requirements.txt` sama dengan lingkungan training; jangan dinaikkan
-tanpa melatih/menyimpan ulang model.
+File model (20 MB) di-commit di `models/` bersama `models/SHA256SUMS`; container me-mount folder itu
+read-only (tidak di-COPY ke image). Versi `numpy`, `pandas`, `scikit-learn`, dan `joblib` di
+`requirements.txt` sama dengan lingkungan training; jangan dinaikkan tanpa melatih/menyimpan ulang model.
+Model baru: ganti file di `models/`, perbarui `SHA256SUMS`, `RF_MODEL_PATH`, dan baris `model_registries`.
 
-Menyalakan (simulasi):
+Menyalakan:
 
 ```bash
-mkdir -p models && cp <path>/smile_irigasi_gabungan_forecast_model.joblib models/
-psql ... -f docs/rf_shadow_model_registry.sql      # sekali; JANGAN ke produksi tanpa keputusan tim
+(cd models && sha256sum -c SHA256SUMS)              # file model utuh
+psql ... -f docs/rf_shadow_model_registry.sql      # sekali; di produksi hanya dengan keputusan tim
 # .env: RF_MODE=shadow, RF_MODEL_ID=<id dari SQL di atas>
-docker compose up -d --build
+docker compose up -d --build app
 docker logs smile-ingest-app 2>&1 | grep '"event": "rf'
 ```
 
@@ -501,6 +502,49 @@ Uji kesamaan fitur dengan training butuh folder ML:
 `RF_TEST_ML_DIR=".../ML/TrainingAgain" pytest tests/test_rf_shadow_pure.py`. Satu-satunya perbedaan
 yang diizinkan: fitur hujan di titik yang jendela 24 jamnya mencakup ketukan manual 7 Nov 16:11–16:13
 (dibuang khusus di training).
+
+## Update server produksi dari repo ini
+
+Repo ini berisi semua yang dibutuhkan untuk membangun ulang server ingest **kecuali** dua hal yang
+memang tidak boleh ada di git: `.env` (password `smile_ingest`, domain) dan database (Supabase).
+Tidak ada Postgres lokal di produksi: `docker-compose.yml` hanya berisi service `app`.
+`docker-compose.sim.yml`, `sim/`, dan `SIMULASI.md` khusus server simulasi; `sim/sim.sh` menolak jalan
+kalau `DATABASE_URL` tidak menunjuk ke container `db` lokal.
+
+| Isi | Di repo | Catatan |
+|---|---|---|
+| Kode `app/`, `scripts/`, `Dockerfile`, `requirements.txt` | ya | image dibangun ulang dari sini (~700 MB karena numpy/pandas/scikit-learn) |
+| `docker-compose.yml` (produksi) | ya | `app` saja, port `127.0.0.1:8080`, mount `./models` read-only |
+| Model RF `models/*.joblib` + `SHA256SUMS` | ya | baru dipakai kalau `RF_MODE` ≠ `off` |
+| Migrasi `smile_migration_v7.sql`, `docs/*migration*.sql`, `docs/rf_shadow_model_registry.sql` | ya | diterapkan manual di Supabase SQL Editor |
+| `.env` | **tidak** | salin dari server produksi lama, atau isi dari `.env.example` |
+| Data (Supabase), backup DB (`import_database/`) | **tidak** | `import_database/` di-ignore (berisi data produksi) |
+
+Langkah (server baru atau update):
+
+```bash
+git clone https://github.com/mirzayanuardi/smile-backendsrv-simulated.git smile-backendsrv
+cd smile-backendsrv && git switch <branch>       # mis. main setelah PR digabung
+cp /path/.env-produksi-lama .env && chmod 600 .env  # atau: cp .env.example .env lalu isi
+grep -E '^(DATABASE_URL|RF_MODE)=' .env | sed 's#//[^@]*@#//***@#'   # host Supabase, RF_MODE=off dulu
+(cd models && sha256sum -c SHA256SUMS)
+docker compose up -d --build app                 # BUKAN -f docker-compose.sim.yml
+docker compose ps                                # app "healthy"
+curl -s http://127.0.0.1:8080/v1/health          # db: "ok"
+docker compose logs --tail=50 app                # "rf: mati (RF_MODE=off)", tanpa error
+```
+
+Skema Supabase per backup 2026-11-12 sudah cukup untuk kode ini dengan `RF_MODE=off`: kolom
+`decision_layer`, `prediction_error_margin`, constraint `ip_*`, dan grant `smile_ingest` ke
+`calibrated_sensor_raw_readings` sudah ada (diuji di server simulasi yang memakai dump skema itu).
+Menyalakan RF di produksi (keputusan tim): jalankan `docs/rf_shadow_model_registry.sql` sekali, isi
+`RF_MODEL_ID`, set `RF_MODE=shadow`, lalu `docker compose up -d --force-recreate app`.
+
+Konfigurasi data yang dipakai simulasi (kalibrasi `{13.279, 0.5814}`, debit, luas basah, `valve_mode`)
+**tidak** ikut ke produksi; semuanya data di Supabase dan diubah manual oleh tim.
+
+Rollback: `RF_MODE=off` + `docker compose up -d --force-recreate app` (RF saja), atau
+`git checkout <commit-lama> && docker compose up -d --build app` (semua kode).
 
 ## Deploy (Caddy + Let's Encrypt)
 

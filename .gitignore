@@ -11,6 +11,8 @@ ceklist_server.xlsx
 supabase_databaase.md
 ~$*
 
-# File model ML (20 MB), dipasang lewat RF_MODEL_PATH
-models/
-*.joblib
+# File model RF di-commit di models/ (cek: cd models && sha256sum -c SHA256SUMS).
+# Backup DB / rollback / .env cadangan: data produksi & rahasia, jangan di-commit.
+import_database/
+.env.*
+!.env.example

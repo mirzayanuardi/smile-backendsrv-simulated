@@ -12,7 +12,8 @@ ke produksi maupun GitHub.**
 
 | File | Perubahan | Alasan |
 |---|---|---|
-| `docker-compose.yml` | Service `app` **identik** dengan produksi, ditambah `depends_on: db`. Ditambah service `db` (Postgres 17) dan volume `simdb` | Pengganti Supabase |
+| `docker-compose.yml` | Versi **produksi**: service `app` saja (+ mount `./models` untuk model RF) | Repo ini juga dipakai untuk update produksi |
+| `docker-compose.sim.yml` (baru) | Service `db` (Postgres 17), volume `simdb`, `app.depends_on: db`. Hanya dipakai `sim/sim.sh` | Pengganti Supabase |
 | `.env` (baru) | Salinan `.env.example`. Hanya `DATABASE_URL` yang diubah, ke `db:5432` lokal | Semua nilai lain = default kode = `.env.example` |
 | `sim/seed.sql` | Data awal: 2 node (token dummy), plot Bogor, parameter Latosol, konfigurasi aktuator | Mengikuti seed di `tests/conftest.py` |
 | `sim/sim.sh` | Perintah `up`, `down`, `reset`, `logs`, `psql`, `node`, `test` | |

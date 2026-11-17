@@ -5,3 +5,6 @@ __pycache__
 .pytest_cache
 tests
 *.sql
+# Model di-mount (bukan di-COPY); backup DB tidak boleh masuk build context
+models
+import_database

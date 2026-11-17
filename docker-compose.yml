@@ -4,9 +4,10 @@ x-logging: &logging
     max-size: "10m"
     max-file: "5"
 
-# SIMULASI. Service `app` identik dengan docker-compose.yml produksi (commit 2f2292e).
-# Tambahan: depends_on ke `db` dan volume ./models (file model RF shadow, lihat README).
-# Service `db` menggantikan Supabase (Postgres lokal; skema = stub + migrasi asli).
+# PRODUKSI. Hanya service `app`; database = Supabase (DATABASE_URL di .env).
+# Sama dengan compose produksi (izerhaf7/smile-backendsrv commit 2f2292e) + mount ./models
+# (file model RF, lihat README "RF: shadow mode dan active mode").
+# Simulasi menambah Postgres lokal lewat docker-compose.sim.yml (dipakai sim/sim.sh), JANGAN di produksi.
 services:
   app:
     build: .
@@ -24,38 +25,3 @@ services:
         limits:
           memory: 1G
     logging: *logging
-    depends_on:
-      db:
-        condition: service_healthy
-
-  # --- Tambahan simulasi: pengganti Supabase -------------------------------
-  db:
-    image: postgres:17-alpine
-    container_name: smile-sim-db
-    restart: unless-stopped
-    environment:
-      POSTGRES_PASSWORD: simadmin
-      POSTGRES_DB: smile
-    ports:
-      - "127.0.0.1:55433:5432"
-    volumes:
-      - simdb:/var/lib/postgresql/data
-      # Dijalankan sekali saat volume masih kosong, urut nama file.
-      # Urutan sama dengan tests/conftest.py.
-      - ./tests/schema_stub.sql:/docker-entrypoint-initdb.d/00_schema_stub.sql:ro
-      - ./smile_migration_v7.sql:/docker-entrypoint-initdb.d/10_v7.sql:ro
-      - ./docs/smile_migration_v8.sql:/docker-entrypoint-initdb.d/20_v8.sql:ro
-      - ./docs/smile_migration_v10.sql:/docker-entrypoint-initdb.d/30_v10.sql:ro
-      - ./docs/migration_v11_neraca_air.sql:/docker-entrypoint-initdb.d/40_v11.sql:ro
-      - ./docs/migration_v12_arsip_cuaca.sql:/docker-entrypoint-initdb.d/50_v12.sql:ro
-      - ./tests/schema_pending.sql:/docker-entrypoint-initdb.d/60_pending.sql:ro
-      - ./sim/seed.sql:/docker-entrypoint-initdb.d/90_seed.sql:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d smile"]
-      interval: 2s
-      timeout: 3s
-      retries: 30
-    logging: *logging
-
-volumes:
-  simdb:

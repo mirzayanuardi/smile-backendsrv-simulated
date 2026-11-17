@@ -23,7 +23,7 @@ MD = ROOT / "supabase_database.md"
 
 def psql(sql: str) -> list[list[str]]:
     out = subprocess.run(
-        ["docker", "compose", "--project-directory", str(ROOT), "-f", str(ROOT / "docker-compose.yml"),
+        ["docker", "compose", "--project-directory", str(ROOT), "-f", str(ROOT / "docker-compose.yml"), "-f", str(ROOT / "docker-compose.sim.yml"),
          "exec", "-T", "db", "psql", "-U", "postgres", "-d", "smile", "-At", "-F", "\x1f", "-c", sql],
         check=True, capture_output=True, text=True,
     ).stdout

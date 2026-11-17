@@ -15,7 +15,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-COMPOSE=(docker compose --project-directory "$ROOT" -f "$ROOT/docker-compose.yml")
+COMPOSE=(docker compose --project-directory "$ROOT" -f "$ROOT/docker-compose.yml" -f "$ROOT/docker-compose.sim.yml")
 URL="http://127.0.0.1:8080"
 # Node data impor Supabase. Token hanya berlaku di DB simulasi (hash-nya diset manual, lihat SIMULASI.md).
 # Setelah `reset` (seed), pakai SIM_NODE=11111111-1111-1111-1111-111111111111 SIM_TOKEN=sim-token-node-1.

@@ -3,3 +3,6 @@
 
 # Script shell dijalankan di Linux; CRLF membuat bash error ("command not found")
 *.sh text eol=lf
+
+# Model RF (pickle biner)
+*.joblib binary
