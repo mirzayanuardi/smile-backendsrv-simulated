@@ -1,0 +1,21 @@
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  app:
+    build: .
+    image: smile-ingest:latest
+    container_name: smile-ingest-app
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8000"
+    env_file:
+      - .env
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    logging: *logging

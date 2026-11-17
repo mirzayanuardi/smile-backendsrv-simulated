@@ -1,0 +1,18 @@
+{
+	email {$ACME_EMAIL}
+	# Hanya Let's Encrypt (tanpa fallback ZeroSSL), supaya root CA yang
+	# ditanam di firmware (ROOT_CA_PEM) tidak tiba-tiba berganti.
+	cert_issuer acme
+}
+
+{$DOMAIN} {
+	handle /v1/* {
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy app:8000
+	}
+	handle {
+		respond 404
+	}
+}

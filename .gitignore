@@ -1,0 +1,12 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+firmware/secrets.h
+
+# Dokumen kerja lokal (laporan penelitian & ceklist), bukan bagian dari kode server
+*.docx
+ceklist_server.xlsx
+supabase_databaase.md
+~$*
