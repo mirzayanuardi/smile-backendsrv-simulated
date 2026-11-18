@@ -135,11 +135,20 @@ kalau ada beberapa worker. Isinya:
    `water_flow_lpm` dan `wetted_area_m2` terisi, server mengambil prediksi
    terbaru plotnya (`irrigation_triggered`, `recommended_irrigation_mm > 0`,
    belum di-dispatch, `dispatch_note` kosong, `created_at` ≤ 30 menit).
-   Prediksi itu diperiksa berurutan: jendela pagi WIB, lalu jeda minimal
+   Prediksi itu diperiksa berurutan: jendela pagi WIB (atau jendela sore, lihat
+   di bawah), lalu jeda minimal
    (riwayat terakhir atau perintah yang sudah mulai), lalu antrean (`pending`/`sent`
    → coba lagi di siklus berikutnya). Setelah lolos, durasi dihitung
    t = I·A/Q·60 (dibulatkan, dibatasi `max_run_s`, < 5 s → `too_small`) dan
    perintah `rule_engine` disisipkan.
+
+   **Jendela sore (`AFTERNOON_WINDOW`, mis. `15-18`, default mati).** Di luar jendela pagi,
+   prediksi boleh di-dispatch kalau jam WIB ada di jendela sore **dan** di jendela pagi node
+   hari itu tidak ada air sama sekali: tidak ada `irrigation_actions` (`success`/`overridden`/
+   `failed`, trigger apa pun termasuk manual dan `local_fallback`) dan tidak ada perintah `irrigate`
+   yang sudah mulai (`started_at`). Kalau pagi sudah disiram: `dispatch_note='morning_irrigated'`.
+   Aturan R4 (antisipasi 24 jam) dan RF active tetap hanya di jendela pagi, jadi sore hanya
+   menyiram keputusan R3 (Dr ≥ RAW). Fallback lokal ESP tetap memakai jendela pagi saja.
 3. Fertigasi auto: **nonaktif** sampai `FERTIGATION_AUTO_STATUSES` diisi.
    Untuk node `pump_mode='auto'` dan `has_fertigation`, server mengambil
    rekomendasi terbaru plotnya dengan status yang diizinkan (≤ 30 menit, belum
@@ -189,6 +198,7 @@ dihitung, ubah `_IRRIGATIONS` di `app/water_balance.py`.
 |---|---|---|
 | `DISPATCHER_ENABLED` | `1` | `0` mematikan dispatcher di proses ini |
 | `DISPATCH_INTERVAL_S` | `60` | Jeda antar siklus |
+| `AFTERNOON_WINDOW` | kosong | Jendela sore `awal-akhir` jam WIB (mis. `15-18`); kosong/tidak valid = mati |
 | `FERTIGATION_EXECUTED_BY` | kosong | Pemetaan trigger → label enum `fertigation_actions.executed_by`, misalnya `manual=manual,rule_engine=auto,schedule=auto`. Kosong = `executed_by` NULL. Label yang tidak ada di enum diabaikan (lihat log saat start) |
 | `FERTIGATION_AUTO_STATUSES` | kosong | Status `fertigation_recommendations` yang boleh di-dispatch otomatis, misalnya `normal,naikkan`. Kosong = fertigasi auto mati |
 

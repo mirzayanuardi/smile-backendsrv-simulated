@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -99,6 +100,18 @@ select greatest(
        ) > now() - make_interval(secs => $2)
 """
 
+# Jendela sore hanya cadangan: tidak dipakai kalau di jendela pagi hari itu air sudah mengalir
+# (otomatis, manual, atau fallback ESP; termasuk perintah yang sudah mulai tapi belum dilaporkan).
+MORNING_COUNTED = ("success", "overridden", "failed")   # irrigation_actions.execution_status
+_MORNING_IRRIGATED = """
+select exists (select 1 from public.irrigation_actions
+                where node_id = $1 and action_timestamp >= $2 and action_timestamp < $3
+                  and execution_status::text = any($4::text[]))
+    or exists (select 1 from public.actuator_commands
+                where node_id = $1 and command = 'irrigate'
+                  and started_at >= $2 and started_at < $3)
+"""
+
 # Paling banyak satu larutan aktif per node (uq_nutrient_batches_one_active).
 _ACTIVE_BATCH = """
 select id from public.nutrient_batches where node_id = $1 and is_active
@@ -142,6 +155,27 @@ def irrigation_seconds(mm: float, area_m2: float, flow_lpm: float) -> float:
 
 def in_morning_window(now: datetime, start_hour: int, end_hour: int) -> bool:
     return start_hour <= now.astimezone(WIB).hour < end_hour
+
+
+def window_bounds(now: datetime, start_hour: int, end_hour: int) -> tuple[datetime, datetime]:
+    """[mulai, akhir) jendela jam WIB pada hari `now` (end_hour boleh 24)."""
+    day = now.astimezone(WIB).replace(hour=0, minute=0, second=0, microsecond=0)
+    return day + timedelta(hours=start_hour), day + timedelta(hours=end_hour)
+
+
+def afternoon_window_from_env() -> tuple[int, int] | None:
+    """AFTERNOON_WINDOW="15-18" (jam WIB). Kosong atau tidak valid = jendela sore mati."""
+    raw = os.environ.get("AFTERNOON_WINDOW", "").strip()
+    if not raw:
+        return None
+    try:
+        start, end = (int(x) for x in raw.split("-"))
+        if not 0 <= start < end <= 24:
+            raise ValueError
+    except ValueError:
+        log.warning("AFTERNOON_WINDOW=%r tidak valid (contoh: 15-18), jendela sore mati", raw)
+        return None
+    return start, end
 
 
 @dataclass
@@ -202,7 +236,8 @@ def plan_fertigation(row, dose_s: int | None) -> Plan:
     return Plan(water_s=water, dose_s=dose_s, clamped_from=clamped_from)
 
 
-async def _decide(conn: asyncpg.Connection, channel: str, row, now: datetime) -> Decision:
+async def _decide(conn: asyncpg.Connection, channel: str, row, now: datetime,
+                  afternoon: tuple[int, int] | None = None) -> Decision:
     d = Decision(channel, row["node_id"], row["ref_id"], "")
     set_cmd, set_note = _MARK[channel]
 
@@ -215,8 +250,13 @@ async def _decide(conn: asyncpg.Connection, channel: str, row, now: datetime) ->
         return d
 
     if channel == "irrigation":
-        if not in_morning_window(now, row["morning_start_hour"], row["morning_end_hour"]):
-            return await note("outside_window")
+        ms, me = row["morning_start_hour"], row["morning_end_hour"]
+        if not in_morning_window(now, ms, me):
+            if afternoon is None or not in_morning_window(now, *afternoon):
+                return await note("outside_window")
+            if await conn.fetchval(_MORNING_IRRIGATED, row["node_id"], *window_bounds(now, ms, me),
+                                   list(MORNING_COUNTED)):
+                return await note("morning_irrigated")
         if await conn.fetchval(_WITHIN_MIN_GAP, row["node_id"], float(row["min_gap_s"])):
             return await note("min_gap")
     if await conn.fetchval(_BUSY, row["node_id"]):
@@ -272,8 +312,11 @@ async def run_cycle(
     conn: asyncpg.Connection,
     fert: FertigationSettings,
     now: datetime | None = None,
+    afternoon: tuple[int, int] | None = None,
 ) -> dict | None:
-    """Satu siklus dalam satu transaksi. None kalau proses lain sedang memegang kunci."""
+    """Satu siklus dalam satu transaksi. None kalau proses lain sedang memegang kunci.
+
+    afternoon: jendela sore (jam WIB) untuk irigasi, hanya kalau pagi itu belum ada air."""
     now = now or datetime.now(timezone.utc)
     decisions: list[Decision] = []
     async with conn.transaction():
@@ -284,7 +327,7 @@ async def run_cycle(
             log_json(event="dispatch_expire", node=r["node_id"], command=r["id"])
 
         for row in await conn.fetch(_IRRIGATION_CANDIDATES):
-            decisions.append(await _decide(conn, "irrigation", row, now))
+            decisions.append(await _decide(conn, "irrigation", row, now, afternoon))
         if fert.auto_statuses:
             for row in await conn.fetch(_FERTIGATION_CANDIDATES, sorted(fert.auto_statuses)):
                 decisions.append(await _decide(conn, "fertigation", row, now))
@@ -297,12 +340,14 @@ async def run_cycle(
 
 
 async def run_forever(database, ctx: ActuatorContext, interval_s: float) -> None:
+    afternoon = afternoon_window_from_env()
+    log.info("dispatcher: jendela sore %s", f"{afternoon[0]:02d}-{afternoon[1]:02d} WIB" if afternoon else "mati")
     while True:
         if database.pool is not None:
             try:
                 async with database.pool.acquire() as conn:
                     _, fert = await ctx.ensure(conn)
-                    await run_cycle(conn, fert)
+                    await run_cycle(conn, fert, afternoon=afternoon)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 - siklus berikutnya mencoba lagi
